@@ -1,6 +1,5 @@
 # app.py
-import os
-from pathlib import Path
+import os, json
 import numpy as np
 import pandas as pd
 import joblib
@@ -10,60 +9,42 @@ st.set_page_config(page_title="Predicción de Riesgo de Diabetes", page_icon="�
 
 # ========= Carga de artefactos =========
 @st.cache_resource
-def load_model(path="artifacts/rf_model.joblib"):
-    if not os.path.exists(path):
-        return None
-    try:
-        return joblib.load(path)
-    except Exception as e:
-        st.error(f"No se pudo cargar el modelo desde '{path}': {e}")
-        return None
+def load_pipeline(path="artifacts/model.joblib"):
+    return joblib.load(path) if os.path.exists(path) else None
 
 @st.cache_resource
 def load_threshold(path="artifacts/threshold.txt", default=0.50):
     try:
-        if os.path.exists(path):
-            return float(open(path).read().strip())
+        return float(open(path).read().strip())
     except Exception:
-        pass
-    return float(default)
+        return float(default)
 
 @st.cache_resource
-def load_scaler(path="artifacts/scaler.joblib"):
-    # Solo si entrenaste con StandardScaler fuera del pipeline
-    return joblib.load(path) if os.path.exists(path) else None
+def load_metadata(path="artifacts/metadata.json"):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return {"input_features": ["Glucose","BloodPressure","Insulin","BMI","Age","DiabetesPedigreeFunction","Gender"],
+            "use_gender": True}
 
-model = load_model()
+pipe = load_pipeline()
 THRESHOLD = load_threshold()
-scaler = load_scaler()
+meta = load_metadata()
 
-if model is None:
-    st.error("⚠️ Falta el modelo en **artifacts/rf_model.joblib**. Expórtalo desde tu notebook.")
+if pipe is None:
+    st.error("⚠️ No se encontró **artifacts/model.joblib**. Sube el pipeline exportado desde tu notebook.")
     st.stop()
 
+INPUT_FEATURES = meta.get("input_features", [])
+USE_GENDER = bool(meta.get("use_gender", True))
+GENDER_MAP = {"Female": 0, "Male": 1}
+
 st.title("🩺 Predicción de Riesgo de Diabetes")
-st.caption("Modelo final: Random Forest. Esta app realiza **inferencia** con el modelo entrenado en tu notebook.")
+st.caption("Modelo final empacado como **Pipeline** (preprocesado + Random Forest). La app solo realiza **inferencia**.")
 st.write(f"Umbral operativo (sensibilidad priorizada): **{THRESHOLD:.2f}**")
 
-# ========= Columnas/orden que espera el modelo =========
-DEFAULT_FEATURES = [
-    "Glucose", "BloodPressure", "Insulin", "BMI", "Age",
-    "DiabetesPedigreeFunction", "Gender",   # quita 'Gender' si no lo usaste
-    # Features derivadas que podrías tener en tu notebook:
-    "Age_BMI", "HighBP"
-]
-if hasattr(model, "feature_names_in_"):
-    FEATURES = list(model.feature_names_in_)
-else:
-    FEATURES = DEFAULT_FEATURES
-
-with st.expander("Columnas esperadas por el modelo"):
-    st.code(FEATURES)
-
-# Numéricas que escalaste en el notebook (ajusta si cambiaste)
-NUMERIC_TO_SCALE = ["Age", "BMI", "BloodPressure", "Insulin", "Glucose", "DiabetesPedigreeFunction"]
-
-GENDER_MAP = {"Female": 0, "Male": 1}
+with st.expander("Campos de entrada esperados"):
+    st.code(INPUT_FEATURES)
 
 # ========= UI =========
 with st.form("form"):
@@ -78,13 +59,13 @@ with st.form("form"):
         dpf     = st.number_input("DiabetesPedigreeFunction", min_value=0.0, max_value=5.0, value=0.5, step=0.01)
 
     gender_value = None
-    if "Gender" in FEATURES:
+    if USE_GENDER and "Gender" in INPUT_FEATURES:
         gender_value = st.selectbox("Gender", list(GENDER_MAP.keys()))
 
     submitted = st.form_submit_button("Predecir")
 
-# ========= Construcción de fila y preprocesamiento =========
-def build_row_dict():
+# ========= Construcción de la fila bruta (el Pipeline hace el resto) =========
+def build_raw_row():
     row = {
         "Glucose": glucose,
         "BloodPressure": bp,
@@ -93,44 +74,29 @@ def build_row_dict():
         "Age": age,
         "DiabetesPedigreeFunction": dpf,
     }
-    # Features derivadas que usaste en el entrenamiento
-    if "Age_BMI" in FEATURES:
-        row["Age_BMI"] = age * bmi
-    if "HighBP" in FEATURES:
-        row["HighBP"] = 1 if bp >= 140 else 0
-    if "Gender" in FEATURES:
+    if USE_GENDER and "Gender" in INPUT_FEATURES:
         row["Gender"] = GENDER_MAP[gender_value]
     return row
 
-def align_and_scale(df: pd.DataFrame) -> pd.DataFrame:
-    # Validar faltantes y extras
-    faltantes = [c for c in FEATURES if c not in df.columns]
-    if faltantes:
-        st.error(f"Faltan columnas requeridas por el modelo: {faltantes}")
-        st.stop()
-    extras = [c for c in df.columns if c not in FEATURES]
-    if extras:
-        df = df.drop(columns=extras, errors="ignore")
-    # Reordenar
-    df = df[FEATURES]
-    # Escalar SI y solo SI tienes scaler externo
-    if scaler is not None:
-        cols_to_scale = [c for c in NUMERIC_TO_SCALE if c in df.columns]
-        df.loc[:, cols_to_scale] = scaler.transform(df[cols_to_scale])
-    return df
-
 # ========= Predicción =========
 if submitted:
-    X_input = pd.DataFrame([build_row_dict()])
-    X_input = align_and_scale(X_input)
+    X_raw = pd.DataFrame([build_raw_row()])
 
-    if hasattr(model, "predict_proba"):
-        prob = float(model.predict_proba(X_input)[:, 1][0])
-    elif hasattr(model, "decision_function"):
-        s = float(model.decision_function(X_input)[0])
-        prob = 1.0 / (1.0 + np.exp(-s))  # aproximación logística
+    # Validación básica de columnas esperadas por la app
+    faltan = [c for c in INPUT_FEATURES if c not in X_raw.columns]
+    if faltan:
+        st.error(f"Faltan columnas de entrada: {faltan}")
+        st.stop()
+
+    # El Pipeline se encarga de: descartar columnas irrelevantes, crear derivadas (Age_BMI, HighBP),
+    # estandarizar numéricas y predecir.
+    if hasattr(pipe, "predict_proba"):
+        prob = float(pipe.predict_proba(X_raw)[:, 1][0])
+    elif hasattr(pipe, "decision_function"):
+        s = float(pipe.decision_function(X_raw)[0])
+        prob = 1.0 / (1.0 + np.exp(-s))
     else:
-        prob = float(model.predict(X_input)[0])  # fallback
+        prob = float(pipe.predict(X_raw)[0])
 
     pred = int(prob >= THRESHOLD)
 
@@ -138,5 +104,5 @@ if submitted:
     st.metric("Probabilidad de riesgo (clase 1)", f"{prob:.2%}")
     st.write(f"**Predicción:** {'Positivo' if pred==1 else 'Negativo'} (umbral {THRESHOLD:.2f})")
 
-    with st.expander("Entrada transformada y alineada"):
-        st.dataframe(X_input)
+    with st.expander("Entrada cruda enviada al Pipeline"):
+        st.dataframe(X_raw)
