@@ -4,12 +4,46 @@ import numpy as np
 import pandas as pd
 import joblib
 import streamlit as st
+from sklearn.base import BaseEstimator, TransformerMixin  # <- necesario para la clase
 
 st.set_page_config(page_title="Predicción de Riesgo de Diabetes", page_icon="🩺", layout="centered")
+
+# ========= (FIX) Define aquí la MISMA clase Featurizer que usaste en el notebook =========
+class Featurizer(BaseEstimator, TransformerMixin):
+    def __init__(self, use_gender=True):
+        self.use_gender = use_gender
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        df = pd.DataFrame(X).copy()
+
+        # Drop columnas irrelevantes si vinieran
+        for col in ["PatientID", "BMI_Category"]:
+            if col in df.columns:
+                df.drop(columns=[col], inplace=True)
+
+        # Mapear género si viene como texto
+        if self.use_gender and "Gender" in df.columns:
+            if df["Gender"].dtype == object:
+                df["Gender"] = df["Gender"].map({"Female": 0, "Male": 1}).astype(float)
+
+        # Features derivadas (como en el entrenamiento)
+        df["Age_BMI"] = df["Age"] * df["BMI"]
+        df["HighBP"] = (df["BloodPressure"] >= 140).astype(int)
+
+        final_cols = ["Glucose","BloodPressure","Insulin","BMI","Age","DiabetesPedigreeFunction"]
+        if self.use_gender:
+            final_cols += ["Gender"]
+        final_cols += ["Age_BMI","HighBP"]
+        final_cols = [c for c in final_cols if c in df.columns]
+        return df[final_cols]
 
 # ========= Carga de artefactos =========
 @st.cache_resource
 def load_pipeline(path="artifacts/model.joblib"):
+    # Nota: ahora que Featurizer existe en este módulo, joblib puede deserializar el pipeline
     return joblib.load(path) if os.path.exists(path) else None
 
 @st.cache_resource
@@ -40,7 +74,7 @@ USE_GENDER = bool(meta.get("use_gender", True))
 GENDER_MAP = {"Female": 0, "Male": 1}
 
 st.title("🩺 Predicción de Riesgo de Diabetes")
-st.caption("Modelo final empacado como **Pipeline** (preprocesado + Random Forest). La app solo realiza **inferencia**.")
+st.caption("Pipeline = Featurizer (derivadas) + escalado + Random Forest. La app solo hace inferencia.")
 st.write(f"Umbral operativo (sensibilidad priorizada): **{THRESHOLD:.2f}**")
 
 with st.expander("Campos de entrada esperados"):
@@ -64,7 +98,6 @@ with st.form("form"):
 
     submitted = st.form_submit_button("Predecir")
 
-# ========= Construcción de la fila bruta (el Pipeline hace el resto) =========
 def build_raw_row():
     row = {
         "Glucose": glucose,
@@ -82,14 +115,12 @@ def build_raw_row():
 if submitted:
     X_raw = pd.DataFrame([build_raw_row()])
 
-    # Validación básica de columnas esperadas por la app
     faltan = [c for c in INPUT_FEATURES if c not in X_raw.columns]
     if faltan:
         st.error(f"Faltan columnas de entrada: {faltan}")
         st.stop()
 
-    # El Pipeline se encarga de: descartar columnas irrelevantes, crear derivadas (Age_BMI, HighBP),
-    # estandarizar numéricas y predecir.
+    # El pipeline se encarga de todo el preprocesado + modelo
     if hasattr(pipe, "predict_proba"):
         prob = float(pipe.predict_proba(X_raw)[:, 1][0])
     elif hasattr(pipe, "decision_function"):
