@@ -1,124 +1,123 @@
-# app.py
-import os, json, sys
-import numpy as np
-import pandas as pd
-import joblib
 import streamlit as st
-from sklearn.base import BaseEstimator, TransformerMixin
-from featurizer import Featurizer 
+import pandas as pd
+import numpy as np
+import joblib
 
-st.set_page_config(page_title="Predicción de Riesgo de Diabetes", page_icon="🩺", layout="centered")
-
-# ====== MISMA CLASE QUE EN EL NOTEBOOK ======
-class Featurizer(BaseEstimator, TransformerMixin):
-    def __init__(self, use_gender=True):
-        self.use_gender = use_gender
-    def fit(self, X, y=None):
-        return self
-    def transform(self, X):
-        df = pd.DataFrame(X).copy()
-        for col in ["PatientID", "BMI_Category"]:
-            if col in df.columns:
-                df.drop(columns=[col], inplace=True)
-        if self.use_gender and "Gender" in df.columns and df["Gender"].dtype == object:
-            df["Gender"] = df["Gender"].map({"Female": 0, "Male": 1}).astype(float)
-        df["Age_BMI"] = df["Age"] * df["BMI"]
-        df["HighBP"]  = (df["BloodPressure"] >= 140).astype(int)
-        final_cols = ["Glucose","BloodPressure","Insulin","BMI","Age","DiabetesPedigreeFunction"]
-        if self.use_gender: final_cols += ["Gender"]
-        final_cols += ["Age_BMI","HighBP"]
-        final_cols = [c for c in final_cols if c in df.columns]
-        return df[final_cols]
-
-# ====== ALIAS PARA QUE EL PICKLE ENCUENTRE LA CLASE ======
-# Muchos notebooks guardan la clase como '__main__.Featurizer' o 'ipykernel_launcher.Featurizer'
-current_mod = sys.modules[__name__]
-for modname in ("__main__", "ipykernel_launcher", "app"):
-    sys.modules.setdefault(modname, current_mod)
-    setattr(sys.modules[modname], "Featurizer", Featurizer)
-
-# ====== Carga de artefactos ======
+# ---------- Cargar modelo y preprocesado ----------
 @st.cache_resource
-def load_pipeline(path="artifacts/model.joblib"):
-    return joblib.load(path) if os.path.exists(path) else None
+def load_artifacts():
+    artifacts = joblib.load("diabetes_rf_model.joblib")
+    return artifacts
 
-@st.cache_resource
-def load_threshold(path="artifacts/threshold.txt", default=0.50):
-    try:
-        return float(open(path).read().strip())
-    except Exception:
-        return float(default)
+artifacts = load_artifacts()
+model = artifacts["model"]
+scaler = artifacts["scaler"]
+num_cols = artifacts["num_cols"]
+feature_cols = artifacts["feature_cols"]
 
-@st.cache_resource
-def load_metadata(path="artifacts/metadata.json"):
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
-    return {"input_features": ["Glucose","BloodPressure","Insulin","BMI","Age","DiabetesPedigreeFunction","Gender"],
-            "use_gender": True}
-
-pipe = load_pipeline()
-THRESHOLD = load_threshold()
-meta = load_metadata()
-
-if pipe is None:
-    st.error("⚠️ No se encontró **artifacts/model.joblib**. Vuelve a subir el pipeline exportado desde tu notebook.")
-    st.stop()
-
-INPUT_FEATURES = meta.get("input_features", [])
-USE_GENDER = bool(meta.get("use_gender", True))
-GENDER_MAP = {"Female": 0, "Male": 1}
+# ---------- Configuración de la página ----------
+st.set_page_config(
+    page_title="Predicción de Riesgo de Diabetes",
+    page_icon="🩺",
+    layout="centered"
+)
 
 st.title("🩺 Predicción de Riesgo de Diabetes")
-st.caption("Pipeline = Featurizer (derivadas) + escalado + Random Forest. La app solo hace inferencia.")
-st.write(f"Umbral operativo: **{THRESHOLD:.2f}**")
+st.write(
+    """
+    Esta aplicación utiliza un modelo de **Machine Learning (Random Forest)** entrenado sobre un 
+    dataset clínico de pacientes para estimar la **probabilidad de diabetes** a partir de 
+    indicadores de salud básicos.
+    
+    Completa los campos y presiona **“Calcular riesgo”**.
+    """
+)
 
-with st.expander("Campos de entrada esperados"):
-    st.code(INPUT_FEATURES)
+# ---------- Formulario de entrada ----------
+with st.form("form_diabetes"):
+    st.subheader("Datos del paciente")
 
-# ====== UI ======
-with st.form("form"):
-    c1, c2 = st.columns(2)
-    with c1:
-        glucose = st.number_input("Glucose (mg/dL)", 0.0, 500.0, 120.0, 1.0)
-        bp      = st.number_input("BloodPressure (mmHg)", 0.0, 250.0, 80.0, 1.0)
-        insulin = st.number_input("Insulin (µU/mL)", 0.0, 900.0, 85.0, 1.0)
-    with c2:
-        bmi     = st.number_input("BMI (kg/m²)", 0.0, 80.0, 28.0, 0.1)
-        age     = st.number_input("Age (años)", 0, 120, 45, 1)
-        dpf     = st.number_input("DiabetesPedigreeFunction", 0.0, 5.0, 0.5, 0.01)
-    gender_value = None
-    if USE_GENDER and "Gender" in INPUT_FEATURES:
-        gender_value = st.selectbox("Gender", list(GENDER_MAP.keys()))
-    submitted = st.form_submit_button("Predecir")
+    col1, col2 = st.columns(2)
 
-def build_raw_row():
-    row = {
-        "Glucose": glucose, "BloodPressure": bp, "Insulin": insulin,
-        "BMI": bmi, "Age": age, "DiabetesPedigreeFunction": dpf,
+    with col1:
+        age = st.number_input("Edad (años)", min_value=1, max_value=120, value=40)
+        gender = st.radio("Género", ["Male", "Female"], index=0)
+        bmi = st.number_input(
+            "Índice de Masa Corporal (BMI)",
+            min_value=10.0, max_value=70.0, value=25.0, step=0.1
+        )
+
+    with col2:
+        bp = st.number_input(
+            "Presión arterial (sistólica, mmHg)",
+            min_value=40.0, max_value=250.0, value=120.0, step=1.0
+        )
+        glucose = st.number_input(
+            "Glucosa (mg/dL)",
+            min_value=0.0, max_value=300.0, value=120.0, step=1.0
+        )
+        insulin = st.number_input(
+            "Insulina",
+            min_value=0.0, max_value=400.0, value=80.0, step=1.0
+        )
+
+    dpf = st.number_input(
+        "Diabetes Pedigree Function (historial familiar)",
+        min_value=0.0, max_value=3.0, value=0.5, step=0.01
+    )
+
+    submitted = st.form_submit_button("Calcular riesgo")
+
+# ---------- Función para construir el vector de características ----------
+def build_features(age, gender, bmi, bp, glucose, insulin, dpf):
+    # Mapeo de género como en tu notebook
+    gender_num = 1 if gender == "Female" else 0
+
+    # Features derivadas iguales que en el notebook
+    high_bp = 1 if bp >= 140 else 0
+    age_bmi = age * bmi
+
+    data = {
+        "Age": age,
+        "BMI": bmi,
+        "BloodPressure": bp,
+        "Insulin": insulin,
+        "Glucose": glucose,
+        "DiabetesPedigreeFunction": dpf,
+        "Gender": gender_num,
+        "Age_BMI": age_bmi,
+        "HighBP": high_bp,
     }
-    if USE_GENDER and "Gender" in INPUT_FEATURES:
-        row["Gender"] = GENDER_MAP[gender_value]
-    return row
 
+    df = pd.DataFrame([data])
+
+    # Aseguramos el mismo orden de columnas usado en el entrenamiento
+    df = df.reindex(columns=feature_cols, fill_value=0)
+
+    # Escalamos solo las columnas numéricas originales
+    df[num_cols] = scaler.transform(df[num_cols])
+
+    return df
+
+# ---------- Lógica de predicción ----------
 if submitted:
-    X_raw = pd.DataFrame([build_raw_row()])
-    faltan = [c for c in INPUT_FEATURES if c not in X_raw.columns]
-    if faltan:
-        st.error(f"Faltan columnas de entrada: {faltan}")
-        st.stop()
+    X_new = build_features(age, gender, bmi, bp, glucose, insulin, dpf)
 
-    if hasattr(pipe, "predict_proba"):
-        prob = float(pipe.predict_proba(X_raw)[:, 1][0])
-    elif hasattr(pipe, "decision_function"):
-        s = float(pipe.decision_function(X_raw)[0])
-        prob = 1.0 / (1.0 + np.exp(-s))
-    else:
-        prob = float(pipe.predict(X_raw)[0])
+    prob = model.predict_proba(X_new)[0, 1]  # probabilidad de clase 1 (diabético)
+    pred = model.predict(X_new)[0]           # 0 = no diabético, 1 = diabético
 
-    pred = int(prob >= THRESHOLD)
     st.subheader("Resultado")
-    st.metric("Probabilidad (clase 1)", f"{prob:.2%}")
-    st.write(f"**Predicción:** {'Positivo' if pred==1 else 'Negativo'} (umbral {THRESHOLD:.2f})")
-    with st.expander("Entrada cruda enviada al Pipeline"):
-        st.dataframe(X_raw)
+
+    st.metric(
+        "Probabilidad estimada de diabetes",
+        f"{prob*100:.1f} %"
+    )
+
+    if pred == 1:
+        st.error("Clasificación del modelo: **ALTO RIESGO / POSITIVO**")
+    else:
+        st.success("Clasificación del modelo: **BAJO RIESGO / NEGATIVO**")
+
+    st.caption(
+        "⚠️ Este resultado es solo orientativo y **no reemplaza** una evaluación clínica profesional."
+    )
