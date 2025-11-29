@@ -5,6 +5,7 @@ import pandas as pd
 import joblib
 import streamlit as st
 from sklearn.base import BaseEstimator, TransformerMixin
+from featurizer import Featurizer 
 
 st.set_page_config(page_title="Predicción de Riesgo de Diabetes", page_icon="🩺", layout="centered")
 
