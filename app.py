@@ -1,90 +1,16 @@
-
-# app.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
-import os
-
-st.set_page_config(page_title="Diabetes Risk Predictor", page_icon="🩺", layout="centered")
-
-@st.cache_resource
-def load_model(path="artifacts/rf_model.joblib"):
-    if not os.path.exists(path):
-        return None
-    try:
-        return joblib.load(path)
-    except Exception as e:
-        st.error(f"No se pudo cargar el modelo desde '{path}': {e}")
-        return None
-
-@st.cache_resource
-def load_threshold(path="artifacts/threshold.txt", default=0.5):
-    try:
-        if os.path.exists(path):
-            return float(open(path).read().strip())
-    except Exception:
-        pass
-    return float(default)
-
-model = load_model()
-THRESHOLD = load_threshold()
-
-st.title("🩺 Predicción de Riesgo de Diabetes")
-st.caption("Modelo final: Random Forest. Esta app solo realiza inferencia.")
-
+# === Features desde el modelo (obligatorio si existen) ===
 DEFAULT_FEATURES = [
-    "Glucose",
-    "BloodPressure",
-    "Insulin",
-    "BMI",
-    "Age",
-    "DiabetesPedigreeFunction",
-    "Gender"
+    "Glucose","BloodPressure","Insulin","BMI","Age","DiabetesPedigreeFunction","Gender"
 ]
+if hasattr(model, "feature_names_in_"):
+    FEATURES = list(model.feature_names_in_)
+else:
+    FEATURES = DEFAULT_FEATURES
 
-def guess_features_from_model(m):
-    feats = None
-    try:
-        feats = list(m.feature_names_in_)
-    except Exception:
-        try:
-            last = getattr(m, "steps", [])[-1][1]
-            feats = list(getattr(last, "feature_names_in_", []))
-        except Exception:
-            feats = None
-    return feats if feats else DEFAULT_FEATURES
+# ... (widgets de entrada iguales a los que ya tienes) ...
 
-FEATURES = guess_features_from_model(model) if model is not None else DEFAULT_FEATURES
-GENDER_MAP = {"Female": 0, "Male": 1}
-
-if model is None:
-    st.error("⚠️ Falta 'artifacts/rf_model.joblib'. Sube el modelo exportado desde el notebook.")
-    st.info("También puedes ajustar 'artifacts/threshold.txt' con tu umbral operativo (por defecto 0.50).")
-    st.stop()
-
-st.write(f"Umbral operativo (sensibilidad priorizada): **{THRESHOLD:.2f}**")
-with st.expander("Columnas esperadas"):
-    st.code(str(FEATURES))
-
-with st.form("form"):
-    col1, col2 = st.columns(2)
-    with col1:
-        glucose = st.number_input("Glucose (mg/dL)", 0.0, 500.0, 120.0, 1.0)
-        bp      = st.number_input("BloodPressure (mmHg)", 0.0, 250.0, 80.0, 1.0)
-        insulin = st.number_input("Insulin (µU/mL)", 0.0, 900.0, 85.0, 1.0)
-    with col2:
-        bmi     = st.number_input("BMI (kg/m²)", 0.0, 80.0, 28.0, 0.1)
-        age     = st.number_input("Age (años)", 0, 120, 45, 1)
-        dpf     = st.number_input("DiabetesPedigreeFunction", 0.0, 5.0, 0.5, 0.01)
-
-    gender_value = None
-    if "Gender" in FEATURES:
-        gender_value = st.selectbox("Gender", ["Female", "Male"])
-
-    submitted = st.form_submit_button("Predecir")
-
-def build_row():
+if submitted:
+    # Construir fila
     row = {
         "Glucose": glucose,
         "BloodPressure": bp,
@@ -95,29 +21,36 @@ def build_row():
     }
     if "Gender" in FEATURES:
         row["Gender"] = {"Female": 0, "Male": 1}[gender_value]
-    return row
 
-if submitted:
-    X_input = pd.DataFrame([build_row()])
-    for c in FEATURES:
-        if c not in X_input.columns:
-            X_input[c] = 0
+    X_input = pd.DataFrame([row])
+
+    # Validar columnas exactas
+    faltantes = [c for c in FEATURES if c not in X_input.columns]
+    extras    = [c for c in X_input.columns if c not in FEATURES]
+    if faltantes:
+        st.error(f"Faltan columnas requeridas por el modelo: {faltantes}. "
+                 "Ajusta los inputs/FEATURES para coincidir con el entrenamiento.")
+        st.stop()
+    if extras:
+        # elimina columnas que el modelo no conoce
+        X_input = X_input.drop(columns=extras, errors="ignore")
+
+    # Reordenar exactamente como espera el modelo
     X_input = X_input[FEATURES]
 
+    # ==== Predicción ====
     if hasattr(model, "predict_proba"):
         prob = float(model.predict_proba(X_input)[:, 1][0])
     elif hasattr(model, "decision_function"):
         s = float(model.decision_function(X_input)[0])
-        prob = 1.0 / (1.0 + np.exp(-s))
+        prob = 1 / (1 + np.exp(-s))
     else:
-        pred = int(model.predict(X_input)[0])
-        prob = float(pred)
+        prob = float(model.predict(X_input)[0])
 
     pred_class = int(prob >= THRESHOLD)
 
     st.subheader("Resultado")
     st.metric("Probabilidad de riesgo (clase 1)", f"{prob:.2%}")
-    st.write(f"**Predicción:** {'Positivo' if pred_class==1 else 'Negativo'}  (umbral {THRESHOLD:.2f})")
-
-    with st.expander("Entrada formateada"):
+    st.write(f"**Predicción:** {'Positivo' if pred_class==1 else 'Negativo'} (umbral {THRESHOLD:.2f})")
+    with st.expander("Ver entrada formateada"):
         st.dataframe(X_input)
