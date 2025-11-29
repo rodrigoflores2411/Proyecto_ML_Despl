@@ -1,0 +1,1 @@
+{"input_features": ["Glucose", "BloodPressure", "Insulin", "BMI", "Age", "DiabetesPedigreeFunction", "Gender"], "use_gender": true}
