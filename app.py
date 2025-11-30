@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import joblib
 
 # ---------- Cargar modelo y preprocesado ----------
 @st.cache_resource
 def load_artifacts():
+    # El archivo debe estar en el mismo repo que este app.py
     artifacts = joblib.load("diabetes_rf_model.joblib")
     return artifacts
 
@@ -25,13 +25,42 @@ st.set_page_config(
 st.title("🩺 Predicción de Riesgo de Diabetes")
 st.write(
     """
-    Esta aplicación utiliza un modelo de **Machine Learning (Random Forest)** entrenado sobre un 
-    dataset clínico de pacientes para estimar la **probabilidad de diabetes** a partir de 
-    indicadores de salud básicos.
-    
-    Completa los campos y presiona **“Calcular riesgo”**.
+    Esta aplicación utiliza un modelo de **Machine Learning (Random Forest)** entrenado
+    para estimar la **probabilidad de diabetes** a partir de indicadores de salud básicos.
+
+    Ingresa los datos del paciente y presiona **"Calcular riesgo"** para obtener la
+    estimación del modelo.
     """
 )
+
+# ---------- Función para construir las features ----------
+def build_features(age, gender, bmi, bp, glucose, insulin, dpf):
+    # Mismo encoding que en el notebook
+    gender_num = 1 if gender == "Female" else 0
+    high_bp = 1 if bp >= 140 else 0
+    age_bmi = age * bmi
+
+    data = {
+        "Age": age,
+        "BMI": bmi,
+        "BloodPressure": bp,
+        "Insulin": insulin,
+        "Glucose": glucose,
+        "DiabetesPedigreeFunction": dpf,
+        "Gender": gender_num,
+        "Age_BMI": age_bmi,
+        "HighBP": high_bp,
+    }
+
+    df = pd.DataFrame([data])
+
+    # Ordenar columnas igual que en el entrenamiento
+    df = df.reindex(columns=feature_cols, fill_value=0)
+
+    # Escalar solo columnas numéricas originales
+    df[num_cols] = scaler.transform(df[num_cols])
+
+    return df
 
 # ---------- Formulario de entrada ----------
 with st.form("form_diabetes"):
@@ -49,7 +78,7 @@ with st.form("form_diabetes"):
 
     with col2:
         bp = st.number_input(
-            "Presión arterial (sistólica, mmHg)",
+            "Presión arterial sistólica (mmHg)",
             min_value=40.0, max_value=250.0, value=120.0, step=1.0
         )
         glucose = st.number_input(
@@ -68,50 +97,15 @@ with st.form("form_diabetes"):
 
     submitted = st.form_submit_button("Calcular riesgo")
 
-# ---------- Función para construir el vector de características ----------
-def build_features(age, gender, bmi, bp, glucose, insulin, dpf):
-    # Mapeo de género como en tu notebook
-    gender_num = 1 if gender == "Female" else 0
-
-    # Features derivadas iguales que en el notebook
-    high_bp = 1 if bp >= 140 else 0
-    age_bmi = age * bmi
-
-    data = {
-        "Age": age,
-        "BMI": bmi,
-        "BloodPressure": bp,
-        "Insulin": insulin,
-        "Glucose": glucose,
-        "DiabetesPedigreeFunction": dpf,
-        "Gender": gender_num,
-        "Age_BMI": age_bmi,
-        "HighBP": high_bp,
-    }
-
-    df = pd.DataFrame([data])
-
-    # Aseguramos el mismo orden de columnas usado en el entrenamiento
-    df = df.reindex(columns=feature_cols, fill_value=0)
-
-    # Escalamos solo las columnas numéricas originales
-    df[num_cols] = scaler.transform(df[num_cols])
-
-    return df
-
-# ---------- Lógica de predicción ----------
+# ---------- Predicción ----------
 if submitted:
     X_new = build_features(age, gender, bmi, bp, glucose, insulin, dpf)
 
-    prob = model.predict_proba(X_new)[0, 1]  # probabilidad de clase 1 (diabético)
-    pred = model.predict(X_new)[0]           # 0 = no diabético, 1 = diabético
+    prob = float(model.predict_proba(X_new)[0, 1])
+    pred = int(model.predict(X_new)[0])
 
     st.subheader("Resultado")
-
-    st.metric(
-        "Probabilidad estimada de diabetes",
-        f"{prob*100:.1f} %"
-    )
+    st.metric("Probabilidad estimada de diabetes", f"{prob*100:.1f} %")
 
     if pred == 1:
         st.error("Clasificación del modelo: **ALTO RIESGO / POSITIVO**")
@@ -119,5 +113,5 @@ if submitted:
         st.success("Clasificación del modelo: **BAJO RIESGO / NEGATIVO**")
 
     st.caption(
-        "⚠️ Este resultado es solo orientativo y **no reemplaza** una evaluación clínica profesional."
+        "⚠️ Este resultado es solo orientativo y **no reemplaza** una evaluación médica profesional."
     )
